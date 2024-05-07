@@ -1,13 +1,17 @@
 import os
-import sys
-import isodate
-from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
-from dotenv import load_dotenv
-
+from pandas import DataFrame, date_range
+from datetime import datetime
 from database import dbWrapper
+from dotenv import load_dotenv
 from parse_input_file import parse_input_file
 
+
+INTERVAL_TYPES = {
+                    'hour': "h",
+                    'day': "D",
+                    'month': "MS",
+                    'year': "YS"
+                }
 
 load_dotenv()
 MONGO_URL = os.getenv("MONGO_URL")
@@ -29,77 +33,57 @@ def get_isoformat(dt_from: str, dt_upto: str):
 
 
 def validate_interval(interval: str):
-    if interval not in INTERVALS:
+    if interval not in INTERVAL_TYPES.keys():
         err = f'Неизвестный интервал: {interval}'
         print(err)
         raise Exception(err)
 
 
-def prepare_pipeline(db_wrapper: dbWrapper, dt_from: str, dt_upto: str, interval: str):
-    iso_dt_from, iso_dt_upto = get_isoformat(dt_from, dt_upto)
-    if interval == 'hour':
-        total_hours = int((iso_dt_upto - iso_dt_from).total_seconds() / 3600)  # Вычисляем общее количество часов
-        date_range = [iso_dt_from + timedelta(hours=i) for i in range(total_hours + 1)]
-    elif interval == 'day':
-        date_range = [iso_dt_from + timedelta(days=i) for i in range((iso_dt_upto - iso_dt_from).days + 1)]
-    else:
-        date_range = [iso_dt_from + relativedelta(months=i) for i in range((iso_dt_upto.year - iso_dt_from.year) * 12 + iso_dt_upto.month - iso_dt_from.month + 1)]
+def create_timestamps_list(start_dt: str, end_dt: str, freq: str):
+    datetime_range = date_range(
+        start=start_dt,
+        end=end_dt,
+        freq=freq
+    )
+    return [str(timestamp) for timestamp in datetime_range]
 
 
-    pipeline, date_format = db_wrapper.get_aggregation_pipeline(
-        iso_dt_from, iso_dt_upto, interval)
-    return pipeline, date_format, date_range
-
-
-def generate_response(result, interval: str, date_format: str, date_range: list[datetime]):
-    dataset = []
-    labels = []
-
-    for doc in result:
-        dataset.append(doc["total_value"])
-        if interval == "hour":
-            date_iso_format = datetime.strptime(
-                f'{doc["_id"]["year"]}-{doc["_id"]["month"]}-{doc["_id"]["day"]} {doc["_id"]["hour"]}',
-                date_format
-            ).isoformat()
-            labels.append(date_iso_format)
-        elif interval == "day":
-            date_iso_format = datetime.strptime(
-                f'{doc["_id"]["year"]}-{doc["_id"]["month"]}-{doc["_id"]["day"]}',
-                date_format
-            ).isoformat()
-            labels.append(date_iso_format)
-        elif interval == "month":
-            date_iso_format = datetime.strptime(f'{doc["_id"]["year"]}-{doc["_id"]["month"]}',
-                                                date_format
-                                                ).isoformat()
-            labels.append(date_iso_format)
+def create_result_dict(
+        timestamps_list: list[str],
+        collection: list,
+    ) -> dict[str, list[str | int]]:
+    dataframe = DataFrame(data=list(collection))
+    result_dict = {}
+    for ts in timestamps_list:
+        dt_item = datetime.fromisoformat(ts)
+        if dt_item not in dataframe.to_numpy():
+            result_dict[dt_item.isoformat()] = 0
         else:
-            raise Exception(f'Неизвестный интревал: {interval}')
-        
-    for date in date_range:
-        date_iso = date.isoformat()
-        if date_iso not in labels:
-            for i, date_label in enumerate(labels):
-                if date_label > date_iso:
-                    labels.insert(i, date_iso)
-                    dataset.insert(i, 0)
-                    break
-
-    response = {"dataset": dataset, "labels": labels}
-    print(response)
+            result_dict[dt_item.isoformat()] = dataframe.loc[dataframe["_id"] == dt_item, "total"].iloc[0]
+    return {
+        "dataset": list(result_dict.values()),
+        "labels": list(result_dict.keys()),
+    }
 
 
 if __name__ == "__main__":
     input_dict = parse_input_file(INPUT_DATA_PATH)
-    validate_interval(input_dict['group_type'])
+
+    dt_from = input_dict['dt_from']
+    dt_upto = input_dict['dt_upto']
+    group_type = input_dict['group_type']
+
+    validate_interval(group_type)
 
     db_wrapper = dbWrapper(MONGO_URL, DB_NAME)
     collection = db_wrapper.db[COLLECTION_NAME]
 
-    pipeline, date_format, date_range = prepare_pipeline(
-        db_wrapper, input_dict['dt_from'], input_dict['dt_upto'], input_dict['group_type'])
+    pipeline = db_wrapper.create_aggregation_pipeline(dt_from, dt_upto, group_type)
 
-    result = collection.aggregate(pipeline=pipeline)
+    aggregation_res = collection.aggregate(pipeline=pipeline)
 
-    generate_response(result, input_dict['group_type'], date_format, date_range)
+    timestamps = create_timestamps_list(dt_from, dt_upto, INTERVAL_TYPES[group_type])
+
+    result = create_result_dict(timestamps, aggregation_res)
+
+    print(str(result).replace("'", '"'))

@@ -2,7 +2,7 @@ import os
 import signal
 from dotenv import load_dotenv
 import subprocess
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, filters
 
 
 load_dotenv()
@@ -19,18 +19,23 @@ dp = Dispatcher()
 async def main(message: types.Message):
     input_json = message.text
     try:
-        print(message.text)
-        with open(INPUT_DATA_PATH, "w") as file:
-            file.write(input_json)
+        if (message.text.startswith('/start') is not True):
+            print(message.text)
 
-        result = subprocess.run(['python3', PATH_TO_SCRIPT],
-                                capture_output=True, text=True)
-        if result.returncode == 0:
-            answer = result.stdout
-        else:
-            answer = f'{ result.returncode}: {result.stderr}'
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            full_path = os.path.join(script_dir, INPUT_DATA_PATH)
 
-        await message.answer(answer)
+            with open(full_path, "w") as file:
+                file.write(input_json)
+
+            result = subprocess.run(['python3', PATH_TO_SCRIPT],
+                                    capture_output=True, text=True)
+            if result.returncode == 0:
+                answer = result.stdout
+            else:
+                answer = f'{ result.returncode}: {result.stderr}'
+
+            await message.answer(answer)
     except Exception as e:
         await message.reply(f"Invalid input\n{e}")
 
